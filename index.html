@@ -223,11 +223,13 @@
     <label class="f"><span>Name</span><input id="pm_name" /></label>
     <div class="two">
       <label class="f"><span>Sphere</span><select id="pm_cluster"></select></label>
-      <label class="f"><span>City / location</span><input id="pm_location" list="cityList" placeholder="e.g. Boston"/></label>
+      <label class="f"><span>Cities (comma separated)</span><input id="pm_location" list="cityList" placeholder="e.g. Berlin, Istanbul"/></label>
       <datalist id="cityList"></datalist>
     </div>
     <label class="f"><span>Role / what they do</span><input id="pm_role" /></label>
     <label class="f"><span>How you know them</span><input id="pm_how" placeholder="e.g. thesis advisor, met at summer school"/></label>
+    <label class="f"><span>Introduced by (optional — draws the line from them, not from you)</span>
+      <select id="pm_via"><option value="">— connected directly to me —</option></select></label>
     <div class="two">
       <label class="f"><span>Last contact</span><input id="pm_last" type="date"/></label>
       <label class="f"><span>Relevance</span>
@@ -324,6 +326,9 @@ const PALETTE = ["var(--c1)","var(--c2)","var(--c3)","var(--c4)","var(--c5)","va
 
 function load(){ try{ const r=localStorage.getItem(LS_KEY); if(r) return JSON.parse(r); }catch(e){} return structuredClone(SEED_DATA); }
 function save(){ try{ localStorage.setItem(LS_KEY, JSON.stringify(DATA)); }catch(e){} }
+function uid(){ return "p"+Date.now().toString(36)+Math.floor(Math.random()*46656).toString(36); }
+function ensureIds(){ const used=new Set(); DATA.clusters.forEach(c=>c.people.forEach(p=>{ if(p.id) used.add(p.id); })); DATA.clusters.forEach(c=>c.people.forEach(p=>{ if(!p.id){ let x; do{ x=uid(); }while(used.has(x)); p.id=x; used.add(x); } })); }
+function findById(id){ for(const c of DATA.clusters) for(const p of c.people) if(p.id===id) return p; return null; }
 
 /* ============================================================ PASSCODE ============================================================ */
 async function sha256(s){ const b=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(s)); return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,"0")).join(""); }
@@ -345,6 +350,7 @@ function boot(){
   zoom=d3.zoom().scaleExtent([0.3,2.5]).on("zoom",ev=>g.attr("transform",ev.transform));
   svg.call(zoom).on("dblclick.zoom",null);
   DATA.clusters.forEach(c=>{ if(c._open===undefined) c._open=true; });
+  ensureIds(); save();
   render(); renderCityPanel(); renderRadar(); refreshCityList(); centerView();
   window.addEventListener("resize",render);
 }
@@ -352,6 +358,8 @@ function daysSince(d){ if(!d) return null; return Math.floor((Date.now()-new Dat
 function ageClass(days){ return days===null?"never":(days>120?"old":"ok"); }
 function cityColor(name){ let h=0; for(const ch of name) h=(h*31+ch.charCodeAt(0))>>>0; return PALETTE[h%PALETTE.length]; }
 function normCity(s){ return (s&&s.trim())?s.trim():"Unknown location"; }
+function getLocations(p){ if(Array.isArray(p.locations)&&p.locations.length) return p.locations.map(s=>String(s).trim()).filter(Boolean); if(typeof p.location==="string"&&p.location.trim()) return p.location.split(",").map(s=>s.trim()).filter(Boolean); return []; }
+function locLabel(p){ return getLocations(p).join(" · "); }
 
 // flat list of every person with their sphere indices
 function allPeople(){ const a=[]; DATA.clusters.forEach((c,ci)=>c.people.forEach((p,pi)=>a.push({c,ci,p,pi}))); return a; }
@@ -360,14 +368,22 @@ function buildHierarchy(){
   const q=(document.getElementById("search").value||"").trim().toLowerCase();
   const root={name:DATA.me.name,type:"root",children:[]};
   if(groupBy==="sphere"){
+    const all=allPeople();
+    const byId={}; all.forEach(x=>{ if(x.p.id) byId[x.p.id]=x; });
+    const kids={}; all.forEach(x=>{ const v=x.p.via; if(v&&byId[v]){ (kids[v]=kids[v]||[]).push(x); } });
+    function pnode(x,seen){
+      const n={name:x.p.name,type:"person",ci:x.ci,pi:x.pi,color:x.c.color,data:x.p,children:[]};
+      (kids[x.p.id]||[]).forEach(ch=>{ if(!seen.has(ch.p.id)){ const s2=new Set(seen); s2.add(ch.p.id); n.children.push(pnode(ch,s2)); } });
+      return n;
+    }
     DATA.clusters.forEach((c,ci)=>{
       const node={name:c.name,type:"cluster",key:c.id,color:c.color,note:c.note,children:[]};
-      if(c._open) c.people.forEach((p,pi)=>node.children.push({name:p.name,type:"person",ci,pi,color:c.color,data:p}));
+      if(c._open) c.people.forEach((p,pi)=>{ if(p.via&&byId[p.via]) return; node.children.push(pnode({c,ci,p,pi},new Set([p.id]))); });
       root.children.push(node);
     });
   } else {
     const byCity={};
-    allPeople().forEach(({p,ci,pi})=>{ const city=normCity(p.location); (byCity[city]=byCity[city]||[]).push({p,ci,pi}); });
+    allPeople().forEach(({p,ci,pi})=>{ const cities=getLocations(p); (cities.length?cities:["Unknown location"]).forEach(city=>{ (byCity[city]=byCity[city]||[]).push({p,ci,pi}); }); });
     Object.keys(byCity).sort((a,b)=>byCity[b].length-byCity[a].length).forEach(city=>{
       const col=cityColor(city);
       if(cityOpen[city]===undefined) cityOpen[city]=true;
@@ -431,8 +447,8 @@ function render(){
     } else if(d.data.type==="person") openDetail(d.data.ci,d.data.pi);
   });
   node.filter(d=>d.data.type==="person").on("mousemove",(ev,d)=>{
-    const p=d.data.data, days=daysSince(p.last);
-    tip.innerHTML=`<b>${esc(p.name)}</b>${p.role?`<small>${esc(p.role)}</small><br>`:""}<small>${p.location?esc(p.location)+" · ":""}${days===null?"no contact logged":days+"d since contact"}</small>`;
+    const p=d.data.data, days=daysSince(p.last), loc=locLabel(p);
+    tip.innerHTML=`<b>${esc(p.name)}</b>${p.role?`<small>${esc(p.role)}</small><br>`:""}<small>${loc?esc(loc)+" · ":""}${days===null?"no contact logged":days+"d since contact"}</small>`;
     tip.style.opacity=1;
     const wr=document.getElementById("graphWrap").getBoundingClientRect();
     tip.style.left=(ev.clientX-wr.left+14)+"px"; tip.style.top=(ev.clientY-wr.top+8)+"px";
@@ -440,7 +456,7 @@ function render(){
 }
 function personMatch(p,ci,q){
   const cl=DATA.clusters[ci];
-  return [p.name,p.role,p.how,p.location,p.notes,(p.tags||[]).join(" "),cl?cl.name:""].join(" ").toLowerCase().includes(q);
+  return [p.name,p.role,p.how,getLocations(p).join(" "),p.notes,(p.tags||[]).join(" "),cl?cl.name:""].join(" ").toLowerCase().includes(q);
 }
 function centerView(){ const wrap=document.getElementById("graphWrap"); svg.call(zoom.transform,d3.zoomIdentity.translate(wrap.clientWidth/2,wrap.clientHeight/2).scale(0.92)); }
 
@@ -460,9 +476,11 @@ function openDetail(ci,pi){
   document.getElementById("panelDetail").innerHTML=`
     <h3 class="pName">${esc(p.name)}</h3>
     <div class="pCluster"><span class="dot" style="background:${c.color}"></span>${esc(c.name)}</div>
-    ${p.location?field("Where they are",`<b style="font-size:15px">${esc(p.location)}</b>`):""}
+    ${(()=>{const L=getLocations(p);return L.length?field(L.length>1?"Cities":"Where they are",L.map(x=>`<span class="pill" style="font-size:12.5px">${esc(x)}</span>`).join("")):"";})()}
     ${p.role?field("Role",esc(p.role)):""}
     ${p.how?field("How you know them",esc(p.how)):""}
+    ${(()=>{const i=p.via?findById(p.via):null;return i?field("Introduced by",`<span class="pill" style="font-size:12.5px">${esc(i.name)}</span>`):"";})()}
+    ${(()=>{const t=[];DATA.clusters.forEach(cc=>cc.people.forEach(pp=>{if(pp.via===p.id)t.push(pp.name);}));return t.length?field("You know through them",t.map(n=>`<span class="pill">${esc(n)}</span>`).join("")):"";})()}
     ${field("Relevance",`<span class="relev">${rel}</span>`)}
     ${field("Last contact",`<span class="agecap age-${ac}">${agetxt}</span>`)}
     ${(p.tags&&p.tags.length)?field("Tags",p.tags.map(t=>`<span class="pill">${esc(t)}</span>`).join("")):""}
@@ -480,7 +498,7 @@ function renderCityPanel(){
   const people=allPeople();
   if(!people.length){ el.innerHTML=`<div class="empty">Add people with a city and this becomes your travel list: open it before a trip to see everyone you know there.</div>`; return; }
   const byCity={};
-  people.forEach(x=>{ const c=normCity(x.p.location); (byCity[c]=byCity[c]||[]).push(x); });
+  people.forEach(x=>{ const cities=getLocations(x.p); (cities.length?cities:["Unknown location"]).forEach(c=>{ (byCity[c]=byCity[c]||[]).push(x); }); });
   const cities=Object.keys(byCity).sort((a,b)=>byCity[b].length-byCity[a].length);
   let html=`<p class="cityFilterNote">Traveling somewhere? Open a city to see everyone you know there, sorted by who is most worth reaching out to.</p>`;
   cities.forEach(city=>{
@@ -519,7 +537,7 @@ function row(x){
   const cap=days===null?"never":days+"d";
   return `<div class="radarItem" data-open="${x.ci}:${x.pi}">
     <span class="dot" style="background:${x.c.color}"></span>
-    <div class="info"><b>${esc(x.p.name)}</b><small>${esc(x.c.name)}${x.p.location?" · "+esc(x.p.location):""}</small></div>
+    <div class="info"><b>${esc(x.p.name)}</b><small>${esc(x.c.name)}${locLabel(x.p)?" · "+esc(locLabel(x.p)):""}</small></div>
     <span class="agecap age-${ac}">${cap}</span>
     <button class="miniquick" data-log="${x.ci}:${x.pi}" title="Log contact today">✓</button></div>`;
 }
@@ -545,7 +563,8 @@ function switchTab(t){
 
 /* ============================================================ PERSON MODAL ============================================================ */
 function fillClusterSelect(sel,val){ sel.innerHTML=DATA.clusters.map((c,i)=>`<option value="${i}" ${i===val?"selected":""}>${esc(c.name)}</option>`).join(""); }
-function refreshCityList(){ const set=[...new Set(allPeople().map(x=>x.p.location).filter(Boolean))].sort(); document.getElementById("cityList").innerHTML=set.map(c=>`<option value="${esc(c)}">`).join(""); }
+function fillViaSelect(sel,selfId,val){ const o=['<option value="">— connected directly to me —</option>']; DATA.clusters.forEach(c=>c.people.forEach(p=>{ if(p.id&&p.id!==selfId) o.push(`<option value="${p.id}" ${p.id===val?"selected":""}>${esc(p.name)} (${esc(c.name)})</option>`); })); sel.innerHTML=o.join(""); }
+function refreshCityList(){ const set=[...new Set(allPeople().flatMap(x=>getLocations(x.p)))].sort(); document.getElementById("cityList").innerHTML=set.map(c=>`<option value="${esc(c)}">`).join(""); }
 function setRel(v){ relValue=v; document.querySelectorAll("#pm_rel button").forEach(b=>b.classList.toggle("on",+b.dataset.r===v)); }
 document.querySelectorAll("#pm_rel button").forEach(b=>b.onclick=()=>setRel(+b.dataset.r));
 function openPersonModal(ci,pi){
@@ -555,17 +574,21 @@ function openPersonModal(ci,pi){
   document.getElementById("pm_delete").classList.toggle("hidden",isNew);
   fillClusterSelect(document.getElementById("pm_cluster"),editing.ci); refreshCityList();
   const p=isNew?{}:DATA.clusters[ci].people[pi];
+  fillViaSelect(document.getElementById("pm_via"), p.id||null, p.via||"");
   pm_name.value=p.name||""; pm_role.value=p.role||""; pm_how.value=p.how||"";
-  pm_location.value=p.location||""; pm_last.value=p.last||""; pm_tags.value=(p.tags||[]).join(", ");
+  pm_location.value=getLocations(p).join(", "); pm_last.value=p.last||""; pm_tags.value=(p.tags||[]).join(", ");
   pm_link.value=p.link||""; pm_notes.value=p.notes||""; setRel(p.rel||3);
   show("personModal");
 }
 document.getElementById("pm_cancel").onclick=()=>hide("personModal");
 document.getElementById("pm_save").onclick=()=>{
   const ci=+document.getElementById("pm_cluster").value;
+  const existing = editing.pi===undefined?null:DATA.clusters[editing.ci].people[editing.pi];
   const obj={ name:pm_name.value.trim()||"Unnamed", role:pm_role.value.trim(), how:pm_how.value.trim(),
-    location:pm_location.value.trim(), last:pm_last.value||null, rel:relValue,
+    locations:pm_location.value.split(",").map(s=>s.trim()).filter(Boolean), last:pm_last.value||null, rel:relValue,
     tags:pm_tags.value.split(",").map(s=>s.trim()).filter(Boolean), link:pm_link.value.trim(), notes:pm_notes.value.trim() };
+  obj.id = (existing&&existing.id)?existing.id:uid();
+  let via=document.getElementById("pm_via").value||""; if(via===obj.id) via=""; obj.via=via;
   if(editing.pi===undefined) DATA.clusters[ci].people.push(obj);
   else if(ci===editing.ci) DATA.clusters[ci].people[editing.pi]=obj;
   else { DATA.clusters[editing.ci].people.splice(editing.pi,1); DATA.clusters[ci].people.push(obj); }
@@ -598,7 +621,7 @@ document.getElementById("closeMenu").onclick=()=>hide("menuModal");
 document.getElementById("addCluster").onclick=()=>show("clusterModal");
 document.getElementById("exportJson").onclick=()=>downloadFile("network-data.json",JSON.stringify(cleanData(),null,2));
 document.getElementById("importJson").onclick=()=>document.getElementById("importFile").click();
-document.getElementById("importFile").onchange=(e)=>{ const f=e.target.files[0]; if(!f) return; const r=new FileReader(); r.onload=()=>{ try{ DATA=JSON.parse(r.result); DATA.clusters.forEach(c=>c._open=true); save(); render(); renderRadar(); renderCityPanel(); refreshCityList(); hide("menuModal"); }catch(err){ alert("Could not read that file."); } }; r.readAsText(f); };
+document.getElementById("importFile").onchange=(e)=>{ const f=e.target.files[0]; if(!f) return; const r=new FileReader(); r.onload=()=>{ try{ DATA=JSON.parse(r.result); DATA.clusters.forEach(c=>c._open=true); ensureIds(); save(); render(); renderRadar(); renderCityPanel(); refreshCityList(); hide("menuModal"); }catch(err){ alert("Could not read that file."); } }; r.readAsText(f); };
 document.getElementById("copyEmbed").onclick=()=>{ const block="const SEED_DATA = "+JSON.stringify(cleanData(),null,2)+";"; const ta=document.getElementById("embedOut"); ta.classList.remove("hidden"); ta.value=block; ta.select(); try{ navigator.clipboard.writeText(block); }catch(e){} };
 document.getElementById("genHash").onclick=async()=>{ const v=document.getElementById("newPass").value; if(!v) return; const h=await sha256(v); const o=document.getElementById("hashOut"); o.classList.remove("hidden"); o.textContent=h; try{ localStorage.setItem("halis_pass_override",h); }catch(e){} };
 
